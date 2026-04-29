@@ -76,22 +76,28 @@ jobs:
           docker push ${{ env.IMAGE_TAG }}
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/ecs-fargate:latest
 
+      # Deploy steps only run on explicit workflow_dispatch (AI agent or manual trigger)
+      # push events are CI-only (build + push image); deployment is always intentional
       - name: Configure AWS credentials
-        if: github.event_name != 'pull_request' && inputs.skip_deploy != true
+        if: github.event_name == 'workflow_dispatch' && inputs.skip_deploy != true
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Update ECS task definition with new image
-        if: github.event_name != 'pull_request' && inputs.skip_deploy != true
+      - name: Resolve or register ECS task definition
+        if: github.event_name == 'workflow_dispatch' && inputs.skip_deploy != true
         run: |
-          TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
-            --query 'taskDefinition' --output json)
+          # Try to get existing task definition; if it doesn't exist, register from template
+          if aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+               --query 'taskDefinition.taskDefinitionArn' --output text 2>/dev/null; then
 
-          NEW_TASK_DEF=$(echo "$TASK_DEF" | python3 -c "
+            TASK_DEF=$(aws ecs describe-task-definition \
+              --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+              --query 'taskDefinition' --output json)
+
+            NEW_TASK_DEF=$(echo "$TASK_DEF" | python3 -c "
           import sys, json
           td = json.load(sys.stdin)
           for key in ['taskDefinitionArn','revision','status','requiresAttributes',
@@ -101,16 +107,29 @@ jobs:
               if c['name'] == '${{ env.CONTAINER_NAME }}':
                   c['image'] = '${{ env.IMAGE_TAG }}'
           print(json.dumps(td))
-          ")
+            ")
+          else
+            echo "Task definition not found — registering from ecs/task-definition.json template"
+            NEW_TASK_DEF=$(python3 -c "
+          import json, sys
+          with open('ecs/task-definition.json') as f:
+              td = json.load(f)
+          for c in td['containerDefinitions']:
+              if c['name'] == '${{ env.CONTAINER_NAME }}':
+                  c['image'] = '${{ env.IMAGE_TAG }}'
+          print(json.dumps(td))
+            ")
+          fi
 
           NEW_ARN=$(echo "$NEW_TASK_DEF" | aws ecs register-task-definition \
             --cli-input-json file:///dev/stdin \
             --query 'taskDefinition.taskDefinitionArn' --output text)
 
           echo "NEW_TASK_DEF_ARN=${NEW_ARN}" >> $GITHUB_ENV
+          echo "Registered task definition: ${NEW_ARN}"
 
       - name: Deploy to ECS Fargate
-        if: github.event_name != 'pull_request' && inputs.skip_deploy != true
+        if: github.event_name == 'workflow_dispatch' && inputs.skip_deploy != true
         run: |
           echo "Deploying to ECS Fargate..."
           aws ecs update-service \
@@ -121,7 +140,7 @@ jobs:
             --region ${{ env.AWS_REGION }}
 
       - name: Wait for deployment
-        if: github.event_name != 'pull_request' && inputs.skip_deploy != true
+        if: github.event_name == 'workflow_dispatch' && inputs.skip_deploy != true
         run: |
           aws ecs wait services-stable \
             --cluster ${{ env.ECS_CLUSTER }} \
@@ -129,7 +148,7 @@ jobs:
             --region ${{ env.AWS_REGION }}
 
       - name: Get service public IP
-        if: github.event_name != 'pull_request' && inputs.skip_deploy != true
+        if: github.event_name == 'workflow_dispatch' && inputs.skip_deploy != true
         id: get-ip
         run: |
           TASK_ARN=$(aws ecs list-tasks --cluster ${{ env.ECS_CLUSTER }} --service-name ${{ env.ECS_SERVICE }} --query 'taskArns[0]' --output text --region ${{ env.AWS_REGION }})
