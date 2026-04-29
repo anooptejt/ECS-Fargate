@@ -1,0 +1,12 @@
+{
+  "name": "ecs-fargate-demo",
+  "version": "1.0.0",
+  "description": "Minimal HTTP service for ECS Fargate demo",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

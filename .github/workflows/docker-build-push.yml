@@ -1,0 +1,91 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    name: Build & Push to Docker Hub
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine image version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Git tag push — use the tag (e.g. v1.2.0)
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            # Branch push — <branch>-<short-sha>
+            SHORT_SHA="${GITHUB_SHA::7}"
+            BRANCH="${GITHUB_REF_NAME//\//-}"
+            VERSION="${BRANCH}-${SHORT_SHA}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (branch push — versioned tag only)
+        if: github.ref_type == 'branch' && github.ref_name != 'main'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/ecs-fargate:${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (main branch — versioned + latest)
+        if: github.ref_type == 'branch' && github.ref_name == 'main'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/ecs-fargate:${{ steps.version.outputs.version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/ecs-fargate:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (git tag — semver tag + latest)
+        if: github.ref_type == 'tag'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/ecs-fargate:${{ steps.version.outputs.version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/ecs-fargate:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image digest summary
+        run: |
+          echo "### Docker Image Published" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Repository:** \`${{ secrets.DOCKERHUB_USERNAME }}/ecs-fargate\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version tag:** \`${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
